@@ -8,6 +8,48 @@ import { type ApiConfig } from "../config";
 import { getVideo, updateVideo } from "../db/videos";
 import { BadRequestError, UserForbiddenError } from "./errors";
 
+async function getVideoAspectRatio(filePath: string) {
+  const ffprobeProcess = Bun.spawn([
+    "ffprobe",
+    "-v",
+    "error",
+    "-print_format",
+    "json",
+    "-show_streams",
+    filePath,
+  ]);
+
+  const output = await new Response(ffprobeProcess.stdout).json();
+
+  const exitCode = await ffprobeProcess.exited;
+  if (exitCode !== 0) {
+    const errorOutput = await new Response(ffprobeProcess.stderr).text();
+    throw new Error(
+      `ffprobe failed with exit code ${exitCode}: ${errorOutput}`,
+    );
+  }
+
+  const videoStream = output.streams.find(
+    (stream: any) => stream.codec_type === "video",
+  );
+
+  if (!videoStream) {
+    throw new Error("No video stream found in the file");
+  }
+
+  const width = videoStream.width;
+  const height = videoStream.height;
+
+  const aspectRatio = Number((width / height).toFixed(2));
+  if (aspectRatio === Number((16 / 9).toFixed(2))) {
+    return "landscape";
+  }
+  if (aspectRatio === Number((9 / 16).toFixed(2))) {
+    return "portrait";
+  }
+  return "other";
+}
+
 const MAX_UPLOAD_SIZE = 1 << 30;
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const { videoId } = req.params as { videoId?: string };
@@ -47,11 +89,14 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
 
   Bun.write(dataPath, video);
 
-  S3Client.file(key).write(Bun.file(dataPath));
+  const aspectRatio = await getVideoAspectRatio(dataPath);
+  const fullKey = `${aspectRatio}/${key}`;
+
+  S3Client.file(fullKey).write(Bun.file(dataPath));
 
   Bun.file(dataPath).delete();
 
-  metadata.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${key}`;
+  metadata.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${fullKey}`;
 
   updateVideo(cfg.db, metadata);
 
