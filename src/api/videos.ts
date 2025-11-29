@@ -50,6 +50,37 @@ async function getVideoAspectRatio(filePath: string) {
   return "other";
 }
 
+async function processVideoForFastStart(inputFilePath: string) {
+  const outputFilePath = `${inputFilePath}.processed.mp4`;
+
+  const ffmpegProcess = Bun.spawn(
+    [
+      "ffmpeg",
+      "-i",
+      inputFilePath,
+      "-movflags",
+      "faststart",
+      "-map_metadata",
+      "0",
+      "-codec",
+      "copy",
+      "-f",
+      "mp4",
+      outputFilePath,
+    ],
+    { stderr: "pipe" },
+  );
+
+  const errorText = await new Response(ffmpegProcess.stderr).text();
+  const exitCode = await ffmpegProcess.exited;
+
+  if (exitCode !== 0) {
+    throw new Error(`FFmpeg error: ${errorText}`);
+  }
+
+  return outputFilePath;
+}
+
 const MAX_UPLOAD_SIZE = 1 << 30;
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const { videoId } = req.params as { videoId?: string };
@@ -90,9 +121,10 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   Bun.write(dataPath, video);
 
   const aspectRatio = await getVideoAspectRatio(dataPath);
+  const processedVideoPath = await processVideoForFastStart(dataPath);
   const fullKey = `${aspectRatio}/${key}`;
 
-  S3Client.file(fullKey).write(Bun.file(dataPath));
+  S3Client.file(fullKey).write(Bun.file(processedVideoPath));
 
   Bun.file(dataPath).delete();
 
