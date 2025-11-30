@@ -1,11 +1,10 @@
 import { respondWithJSON } from "./json";
 
 import { S3Client, type BunRequest } from "bun";
-import { randomBytes } from "crypto";
 import path from "path";
 import { getBearerToken, validateJWT } from "../auth";
 import { type ApiConfig } from "../config";
-import { getVideo, updateVideo } from "../db/videos";
+import { getVideo, updateVideo, type Video } from "../db/videos";
 import { BadRequestError, UserForbiddenError } from "./errors";
 
 async function getVideoAspectRatio(filePath: string) {
@@ -81,6 +80,24 @@ async function processVideoForFastStart(inputFilePath: string) {
   return outputFilePath;
 }
 
+async function generatePresignedURL(
+  cfg: ApiConfig,
+  key: string,
+  expireTime: number,
+) {
+  return cfg.s3Client.presign(`${key}`, { expiresIn: expireTime });
+}
+
+export async function dbVideoToSignedVideo(cfg: ApiConfig, video: Video) {
+  if (!video.videoURL) {
+    return video;
+  }
+
+  video.videoURL = await generatePresignedURL(cfg, video.videoURL, 5 * 60);
+
+  return video;
+}
+
 const MAX_UPLOAD_SIZE = 1 << 30;
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const { videoId } = req.params as { videoId?: string };
@@ -115,7 +132,7 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
     throw new BadRequestError("Unsupported video file type");
   }
 
-  const key = `${randomBytes(32).toString("base64url")}.${type.split("/")[1]}`;
+  const key = `${videoId}.mp4`;
   const dataPath = path.join(cfg.assetsRoot, key);
 
   Bun.write(dataPath, video);
@@ -128,9 +145,11 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
 
   Bun.file(dataPath).delete();
 
-  metadata.videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${fullKey}`;
+  metadata.videoURL = `${fullKey}`;
 
   updateVideo(cfg.db, metadata);
 
-  return respondWithJSON(200, null);
+  const signedVideo = dbVideoToSignedVideo(cfg, metadata);
+
+  return respondWithJSON(200, signedVideo);
 }
